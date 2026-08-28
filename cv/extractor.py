@@ -1,39 +1,40 @@
-import os
 import fitz  # PyMuPDF
+import os
+from PIL import Image
+import io
+
+def preprocess_image(image_bytes: bytes) -> Image.Image:
+    """Normalizes images to grayscale and standard 256x256 dimensions."""
+    img = Image.open(io.BytesIO(image_bytes))
+    img = img.convert("L")
+    img = img.resize((256, 256), Image.Resampling.LANCZOS)
+    return img
 
 def extract_figures_from_pdf(pdf_path: str, output_folder: str = "extracted_figures") -> list[str]:
-    """
-    Extracts all images from a PDF file and saves them to a specified output folder.
-    Returns a list of file paths for all extracted images.
-    """
-    if not os.path.exists(pdf_path):
-        raise FileNotFoundError(f"PDF file not found at: {pdf_path}")
+    """Extracts embedded figures from PDF pages and normalizes them."""
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
         
-    os.makedirs(output_folder, exist_ok=True)
     doc = fitz.open(pdf_path)
-    saved_image_paths = []
-
+    extracted_paths = []
+    
     for page_index in range(len(doc)):
         page = doc[page_index]
         image_list = page.get_images(full=True)
-
-        for img_index, img in enumerate(image_list, start=1):
-            xref = img[0]
+        
+        for img_index, img_info in enumerate(image_list):
+            xref = img_info[0]
             base_image = doc.extract_image(xref)
             image_bytes = base_image["image"]
-            image_ext = base_image["ext"]
-
-            # Standardized filename structure: pageX_imgY.ext
-            img_name = f"page{page_index + 1}_img{img_index}.{image_ext}"
-            img_path = os.path.join(output_folder, img_name)
             
-            with open(img_path, "wb") as f:
-                f.write(image_bytes)
-            
-            saved_image_paths.append(img_path)
-
+            try:
+                processed_img = preprocess_image(image_bytes)
+                output_filename = f"page{page_index + 1}_img{img_index + 1}.png"
+                output_path = os.path.join(output_folder, output_filename)
+                processed_img.save(output_path, format="PNG")
+                extracted_paths.append(output_path)
+            except Exception:
+                continue
+                
     doc.close()
-    return saved_image_paths
-
-if __name__ == "__main__":
-    print("PDF Extractor Engine initialized successfully.")
+    return extracted_paths
