@@ -1,0 +1,14 @@
+# Virtual Environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Extracted image folders & temporary uploads
+extracted_*
+temp_*
+
+# Generated PDFs and SQLite DB
+clean_*
+audit_report_*
+graphshield.db
