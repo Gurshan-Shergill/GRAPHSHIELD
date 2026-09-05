@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: graphshield-api
+    ports:
+      - "8000:8000"
+    environment:
+      - USE_CLOUD_SQL=${USE_CLOUD_SQL:-false}
+      - CLOUD_SQL_INSTANCE=${CLOUD_SQL_INSTANCE}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASS=${DB_PASS}
+      - DB_NAME=${DB_NAME:-graphshield}
+      - PRIVATE_IP=${PRIVATE_IP:-false}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}
+      - API_KEYS=${API_KEYS}
+      - DEBUG=${DEBUG:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-100}
+      - RATE_LIMIT_WINDOW=${RATE_LIMIT_WINDOW:-60}
+    volumes:
+      - ./exports:/app/exports
+      - ./graphshield.db:/app/graphshield.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Cloud SQL Proxy for local development
+  # cloudsql-proxy:
+  #   image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.8.0
+  #   container_name: graphshield-cloudsql-proxy
+  #   command:
+  #     - "--structured-logs"
+  #     - "--address=0.0.0.0:5432"
+  #     - "${CLOUD_SQL_INSTANCE}"
+  #   environment:
+  #     - CLOUD_SQL_INSTANCE=${CLOUD_SQL_INSTANCE}
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - ${GOOGLE_APPLICATION_CREDENTIALS}:/credentials.json:ro
+  #   restart: unless-stopped

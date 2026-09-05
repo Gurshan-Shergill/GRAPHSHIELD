@@ -4,6 +4,9 @@ venv/
 __pycache__/
 *.pyc
 
+# Environment variables
+.env
+
 # Extracted image folders & temporary uploads
 extracted_*
 temp_*
