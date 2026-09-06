@@ -1049,20 +1049,22 @@ async def get_database_stats(api_key: str = Depends(verify_api_key)):
     dependencies=[Depends(verify_api_key)],
     response_class=FileResponse,
     responses={
-        200: {"content": {"application/pdf": {}}, "description": "PDF audit report (default)"},
-        400: {"description": "Invalid file type"},
+        200: {
+            "content": {"application/pdf": {}},
+            "description": "PDF audit report with per-figure schematic analysis + deplagiarized PDF"
+        },
+        400: {"description": "Invalid file type - PDF only"},
         413: {"description": "File too large"},
         500: {"description": "Scan failed"}
     },
-    summary="Scan PDF for plagiarism - returns PDF audit report by default. Use json=true for JSON response."
+    summary="Upload PDF → Returns detailed schematic audit report + deplagiarized PDF (figures > threshold removed)"
 )
 @limiter.limit(f"{settings.rate_limit_requests}/{settings.rate_limit_window}seconds")
 async def scan_pdf(
     request: Request, 
     file: UploadFile = File(..., description="PDF file to scan for plagiarism"),
-    json: bool = Query(False, description="If true, returns JSON instead of PDF"),
-    deplagiarize: bool = Query(False, description="If true, also returns deplagiarized PDF with flagged figures removed"),
-    threshold: float = Query(60.0, description="Similarity threshold % to remove figures (for deplagiarize)"),
+    deplagiarize: bool = Query(True, description="Generate deplagiarized PDF with flagged figures removed"),
+    threshold: float = Query(60.0, ge=10, le=95, description="Similarity threshold % to flag/remove figures"),
     api_key: str = Depends(verify_api_key)
 ):
     request_id = request.state.request_id
@@ -1326,34 +1328,20 @@ async def scan_pdf(
             )
             LATEST_EXPORTS["deplagiarized"] = deplagiarized_path
 
-        # Return PDF by default, JSON if requested
-        if json:
-            return ScanResponse(
-                filename=file.filename,
-                total_figures=total_figures,
-                text_blocks=len(text_passages),
-                image_risk_score=f"{image_risk_score}%",
-                text_risk_score=f"{avg_text_sim}%",
-                overall_status="CRITICAL RISKS DETECTED" if (image_risk_score > 25.0 or avg_text_sim > 25.0) else "CLEARED INTEGRITY AUDIT",
-                report_generated=True,
-                request_id=request_id,
-                cross_references={
-                    "total_matches": len(cross_ref_matches),
-                    "top_matches": cross_ref_matches[:5]
-                }
-            )
-
-        # Return PDF (audit report by default)
+        # Always return PDF audit report
         response = FileResponse(
             path=pdf_path,
             media_type="application/pdf",
             filename=f"Detailed_Plagiarism_Audit_{file.filename}.pdf",
-            headers={"Content-Disposition": f'attachment; filename="Detailed_Plagiarism_Audit_{file.filename}.pdf"'}
+            headers={
+                "Content-Disposition": f'attachment; filename="Detailed_Plagiarism_Audit_{file.filename}.pdf"',
+                "X-Deplagiarized-PDF": deplagiarized_path if deplagiarized_path else "",
+                "X-Image-Risk": f"{image_risk_score}%",
+                "X-Text-Risk": f"{avg_text_sim}%",
+                "X-Total-Figures": str(total_figures),
+                "X-Flagged-Figures": str(sum(1 for f in figure_audit_data if f.get("similarity", 0) >= threshold))
+            }
         )
-        
-        # Add deplagiarized PDF path as header if generated
-        if deplagiarized_path:
-            response.headers["X-Deplagiarized-PDF"] = deplagiarized_path
         
         return response
 
