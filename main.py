@@ -17,7 +17,7 @@ import httpx
 from PIL import Image
 import imagehash
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request, status, Security
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request, status, Security, Query
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
@@ -961,13 +961,13 @@ async def get_database_stats(api_key: str = Depends(verify_api_key)):
             "description": "Scan result (JSON) or PDF report (if download=true)"
         }
     },
-    summary="Scan PDF for plagiarism. Set download=true to get PDF directly."
+    summary="Scan PDF for plagiarism. Check 'download' to get PDF directly instead of JSON."
 )
 @limiter.limit(f"{settings.rate_limit_requests}/{settings.rate_limit_window}seconds")
 async def scan_pdf(
     request: Request, 
-    file: UploadFile = File(...),
-    download: bool = False
+    file: UploadFile = File(..., description="PDF file to scan for plagiarism"),
+    download: bool = Query(False, description="If true, returns PDF report directly instead of JSON response")
 ):
     request_id = request.state.request_id
     logger_ctx = logging.LoggerAdapter(logger, {"request_id": request_id})
