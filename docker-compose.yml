@@ -1,8 +1,78 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: graphshield-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-graphshield}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASS:-postgres}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    command: >
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=256MB
+      -c work_mem=16MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-graphshield}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  redis:
+    image: redis:7-alpine
+    container_name: graphshield-redis
+    volumes:
+      - redis:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+  minio:
+    image: minio/minio:latest
+    container_name: graphshield-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
   api:
-    build: .
+    build: ./backend
     container_name: graphshield-api
     ports:
       - "8000:8000"
@@ -10,7 +80,7 @@ services:
       - USE_CLOUD_SQL=${USE_CLOUD_SQL:-false}
       - CLOUD_SQL_INSTANCE=${CLOUD_SQL_INSTANCE}
       - DB_USER=${DB_USER:-postgres}
-      - DB_PASS=${DB_PASS}
+      - DB_PASS=${DB_PASS:-postgres}
       - DB_NAME=${DB_NAME:-graphshield}
       - PRIVATE_IP=${PRIVATE_IP:-false}
       - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}
@@ -20,29 +90,185 @@ services:
       - LOG_FORMAT=${LOG_FORMAT:-json}
       - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-100}
       - RATE_LIMIT_WINDOW=${RATE_LIMIT_WINDOW:-60}
-    volumes:
-      - ./exports:/app/exports
-      - ./graphshield.db:/app/graphshield.db
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_ALGORITHM=HS256
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=15
+      - JWT_REFRESH_TOKEN_EXPIRE_DAYS=7
+      - API_KEY_PREFIX=gs_
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MINIO_BUCKET=${MINIO_BUCKET:-graphshield}
+      - MINIO_SECURE=false
+      - CLIP_MODEL=${CLIP_MODEL:-ViT-B-32}
+      - CLIP_PRETRAINED=${CLIP_PRETRAINED:-openai}
+      - EASYOCR_LANGUAGES=${EASYOCR_LANGUAGES:-en,hi}
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-512}
+      - PGVECTOR_HNSW_M=${PGVECTOR_HNSW_M:-16}
+      - PGVECTOR_HNSW_EF_CONSTRUCTION=${PGVECTOR_HNSW_EF_CONSTRUCTION:-64}
+      - FAISS_NLIST=${FAISS_NLIST:-100}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-100}
+      - MAX_FIGURES_PER_PAPER=${MAX_FIGURES_PER_PAPER:-50}
+      - SHODHGANGA_SYNC_ENABLED=${SHODHGANGA_SYNC_ENABLED:-true}
+      - SHODHGANGA_SYNC_CRON=${SHODHGANGA_SYNC_CRON:-0 2 * * 0}
+      - WEBHOOK_TIMEOUT_SECONDS=${WEBHOOK_TIMEOUT_SECONDS:-10}
+      - WEBHOOK_MAX_RETRIES=${WEBHOOK_MAX_RETRIES:-3}
+      - EXPORTS_DIR=${EXPORTS_DIR:-exports}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 20s
 
-  # Optional: Cloud SQL Proxy for local development
-  # cloudsql-proxy:
-  #   image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.8.0
-  #   container_name: graphshield-cloudsql-proxy
-  #   command:
-  #     - "--structured-logs"
-  #     - "--address=0.0.0.0:5432"
-  #     - "${CLOUD_SQL_INSTANCE}"
-  #   environment:
-  #     - CLOUD_SQL_INSTANCE=${CLOUD_SQL_INSTANCE}
-  #   ports:
-  #     - "5432:5432"
-  #   volumes:
-  #     - ${GOOGLE_APPLICATION_CREDENTIALS}:/credentials.json:ro
-  #   restart: unless-stopped
+  worker-high:
+    build: ./backend
+    container_name: graphshield-worker-high
+    command: celery -A app.workers worker -Q high -c 2 --prefetch-multiplier=1 --loglevel=info
+    environment:
+      - USE_CLOUD_SQL=${USE_CLOUD_SQL:-false}
+      - CLOUD_SQL_INSTANCE=${CLOUD_SQL_INSTANCE}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASS=${DB_PASS:-postgres}
+      - DB_NAME=${DB_NAME:-graphshield}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MINIO_BUCKET=${MINIO_BUCKET:-graphshield}
+      - MINIO_SECURE=false
+      - CLIP_MODEL=${CLIP_MODEL:-ViT-B-32}
+      - CLIP_PRETRAINED=${CLIP_PRETRAINED:-openai}
+      - EASYOCR_LANGUAGES=${EASYOCR_LANGUAGES:-en,hi}
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-512}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-100}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  worker-default:
+    build: ./backend
+    container_name: graphshield-worker-default
+    command: celery -A app.workers worker -Q default -c 4 --loglevel=info
+    environment:
+      - USE_CLOUD_SQL=${USE_CLOUD_SQL:-false}
+      - CLOUD_SQL_INSTANCE=${CLOUD_SQL_INSTANCE}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASS=${DB_PASS:-postgres}
+      - DB_NAME=${DB_NAME:-graphshield}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MINIO_BUCKET=${MINIO_BUCKET:-graphshield}
+      - MINIO_SECURE=false
+      - CLIP_MODEL=${CLIP_MODEL:-ViT-B-32}
+      - CLIP_PRETRAINED=${CLIP_PRETRAINED:-openai}
+      - EASYOCR_LANGUAGES=${EASYOCR_LANGUAGES:-en,hi}
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-512}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-100}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+
+  worker-low:
+    build: ./backend
+    container_name: graphshield-worker-low
+    command: celery -A app.workers worker -Q low -c 4 --loglevel=info
+    environment:
+      - USE_CLOUD_SQL=${USE_CLOUD_SQL:-false}
+      - CLOUD_SQL_INSTANCE=${CLOUD_SQL_INSTANCE}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASS=${DB_PASS:-postgres}
+      - DB_NAME=${DB_NAME:-graphshield}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MINIO_BUCKET=${MINIO_BUCKET:-graphshield}
+      - MINIO_SECURE=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  beat:
+    build: ./backend
+    container_name: graphshield-beat
+    command: celery -A app.workers beat --schedule=/app/celerybeat-schedule --loglevel=info
+    environment:
+      - USE_CLOUD_SQL=${USE_CLOUD_SQL:-false}
+      - CLOUD_SQL_INSTANCE=${CLOUD_SQL_INSTANCE}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASS=${DB_PASS:-postgres}
+      - DB_NAME=${DB_NAME:-graphshield}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+volumes:
+  pgdata:
+  redis:
+  minio:
